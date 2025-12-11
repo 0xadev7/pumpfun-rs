@@ -63,6 +63,18 @@ pub struct CreateTokenMetadata {
     pub website: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImageUploadResponse {
+    pub image: String, // IPFS URL
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataUploadResponse {
+    pub metadata: MetadataContent,
+    pub metadata_uri: String,
+}
+
 /// Creates and uploads token metadata to IPFS via the Pump.fun API.
 ///
 /// This function takes token metadata and an image file, constructs a multipart form request,
@@ -105,9 +117,7 @@ pub async fn create_token_metadata(
     // Step 1: Upload image to IPFS
     let image_url = upload_image_to_ipfs(&metadata.file).await
         .context("Failed to upload image to IPFS")?;
-    
-    tracing::info!("✅ Image uploaded to IPFS: {}", image_url);
-    
+        
     // Step 2: Upload JSON metadata to IPFS (including image URL)
     let metadata_response = upload_metadata_json_to_ipfs(
         &metadata.name,
@@ -119,8 +129,6 @@ pub async fn create_token_metadata(
         metadata.website.as_deref(),
     ).await
         .context("Failed to upload metadata JSON to IPFS")?;
-    
-    tracing::info!("✅ Metadata uploaded to IPFS: {}", metadata_response.metadata_uri);
     
     Ok(metadata_response)
 }
