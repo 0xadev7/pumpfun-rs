@@ -104,46 +104,34 @@ pub async fn create_token_metadata(
     let boundary = "------------------------f4d9c2e8b7a5310f";
     let mut body = Vec::new();
 
-    // Helper function to append form data
-    fn append_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &[u8], content_type: Option<&str>) {
+    // Helper function to append text field
+    fn append_text_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
         body.extend_from_slice(b"--");
         body.extend_from_slice(boundary.as_bytes());
         body.extend_from_slice(b"\r\n");
-        
-        if let Some(ct) = content_type {
-            body.extend_from_slice(
-                format!("Content-Disposition: form-data; name=\"{}\"; filename=\"image.png\"\r\n", name).as_bytes(),
-            );
-            body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", ct).as_bytes());
-        } else {
-            body.extend_from_slice(
-                format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
-            );
-        }
-        
-        body.extend_from_slice(value);
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
         body.extend_from_slice(b"\r\n");
     }
 
-    // Build JSON data object - ALWAYS include all fields
-    let data = serde_json::json!({
-        "name": metadata.name,
-        "symbol": metadata.symbol,
-        "description": metadata.description,
-        "showName": true,
-        "twitter": metadata.twitter.unwrap_or_default(),
-        "telegram": metadata.telegram.unwrap_or_default(),
-        "website": metadata.website.unwrap_or_default(),
-    });
+    // Append text fields - EXACTLY like the JavaScript version
+    append_text_field(&mut body, boundary, "name", &metadata.name);
+    append_text_field(&mut body, boundary, "symbol", &metadata.symbol);
+    append_text_field(&mut body, boundary, "description", &metadata.description);
+    
+    // Always append twitter, telegram, website (even if empty) to match JS version
+    append_text_field(&mut body, boundary, "twitter", &metadata.twitter.clone().unwrap_or_default());
+    append_text_field(&mut body, boundary, "telegram", &metadata.telegram.clone().unwrap_or_default());
+    append_text_field(&mut body, boundary, "website", &metadata.website.clone().unwrap_or_default());
+    append_text_field(&mut body, boundary, "showName", "true");
 
-    // Append JSON data field
-    let data_string = serde_json::to_string(&data)?;
-    append_field(&mut body, boundary, "data", data_string.as_bytes(), None);
-
-    // Read and append file
-    let mut file = File::open(&metadata.file)?;
-    let mut file_contents = Vec::new();
-    file.read_to_end(&mut file_contents)?;
+    // Append file part
+    body.extend_from_slice(b"--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n");
     
     // Determine content type based on file extension
     let content_type = if metadata.file.ends_with(".png") {
@@ -153,17 +141,22 @@ pub async fn create_token_metadata(
     } else if metadata.file.ends_with(".gif") {
         "image/gif"
     } else {
-        "application/octet-stream"
+        "image/png"
     };
     
-    append_field(&mut body, boundary, "file", &file_contents, Some(content_type));
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
 
-    // Close boundary
-    body.extend_from_slice(b"--");
+    // Read the file contents
+    let mut file = File::open(&metadata.file)?;
+    let mut file_contents = Vec::new();
+    file.read_to_end(&mut file_contents)?;
+    body.extend_from_slice(&file_contents);
+
+    // Close the boundary
+    body.extend_from_slice(b"\r\n--");
     body.extend_from_slice(boundary.as_bytes());
     body.extend_from_slice(b"--\r\n");
 
-    // Send request
     let client = isahc::HttpClient::new()?;
     let request = isahc::Request::builder()
         .method("POST")
@@ -172,11 +165,15 @@ pub async fn create_token_metadata(
             "Content-Type",
             format!("multipart/form-data; boundary={}", boundary),
         )
-        .header("Content-Length", body.len() as u64)
         .body(isahc::AsyncBody::from(body))?;
 
+    // Send request and get response
     let mut response = client.send_async(request).await?;
     let text = response.text().await?;
+    
+    // Debug: print raw response
+    println!("IPFS API Response: {}", text);
+    
     let json: TokenMetadataResponse = serde_json::from_str(&text)?;
 
     Ok(json)
