@@ -8,6 +8,7 @@ pub mod transaction;
 use isahc::AsyncReadResponseExt;
 use serde::{Deserialize, Serialize};
 use std::{fs::File, io::Read};
+use anyhow::{Result, Context};
 
 /// Metadata structure for a token, matching the format expected by Pump.fun.
 #[derive(Debug, Serialize, Deserialize)]
