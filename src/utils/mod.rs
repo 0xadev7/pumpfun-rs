@@ -101,82 +101,27 @@ pub struct CreateTokenMetadata {
 pub async fn create_token_metadata(
     metadata: CreateTokenMetadata,
 ) -> Result<TokenMetadataResponse, Box<dyn std::error::Error>> {
-    let boundary = "------------------------f4d9c2e8b7a5310f";
-    let mut body = Vec::new();
-
-    // Helper function to append text field
-    fn append_text_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
-        body.extend_from_slice(b"--");
-        body.extend_from_slice(boundary.as_bytes());
-        body.extend_from_slice(b"\r\n");
-        body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
-        );
-        body.extend_from_slice(value.as_bytes());
-        body.extend_from_slice(b"\r\n");
-    }
-
-    // Append text fields - EXACTLY like the JavaScript version
-    append_text_field(&mut body, boundary, "name", &metadata.name);
-    append_text_field(&mut body, boundary, "symbol", &metadata.symbol);
-    append_text_field(&mut body, boundary, "description", &metadata.description);
+    // Step 1: Upload image to IPFS
+    let image_url = upload_image_to_ipfs(&metadata.file).await
+        .context("Failed to upload image to IPFS")?;
     
-    // Always append twitter, telegram, website (even if empty) to match JS version
-    append_text_field(&mut body, boundary, "twitter", &metadata.twitter.clone().unwrap_or_default());
-    append_text_field(&mut body, boundary, "telegram", &metadata.telegram.clone().unwrap_or_default());
-    append_text_field(&mut body, boundary, "website", &metadata.website.clone().unwrap_or_default());
-    append_text_field(&mut body, boundary, "showName", "true");
-
-    // Append file part
-    body.extend_from_slice(b"--");
-    body.extend_from_slice(boundary.as_bytes());
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n");
+    tracing::info!("✅ Image uploaded to IPFS: {}", image_url);
     
-    // Determine content type based on file extension
-    let content_type = if metadata.file.ends_with(".png") {
-        "image/png"
-    } else if metadata.file.ends_with(".jpg") || metadata.file.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if metadata.file.ends_with(".gif") {
-        "image/gif"
-    } else {
-        "image/png"
-    };
+    // Step 2: Upload JSON metadata to IPFS (including image URL)
+    let metadata_response = upload_metadata_json_to_ipfs(
+        &metadata.name,
+        &metadata.symbol,
+        &metadata.description,
+        &image_url,
+        metadata.twitter.as_deref(),
+        metadata.telegram.as_deref(),
+        metadata.website.as_deref(),
+    ).await
+        .context("Failed to upload metadata JSON to IPFS")?;
     
-    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
-
-    // Read the file contents
-    let mut file = File::open(&metadata.file)?;
-    let mut file_contents = Vec::new();
-    file.read_to_end(&mut file_contents)?;
-    body.extend_from_slice(&file_contents);
-
-    // Close the boundary
-    body.extend_from_slice(b"\r\n--");
-    body.extend_from_slice(boundary.as_bytes());
-    body.extend_from_slice(b"--\r\n");
-
-    let client = isahc::HttpClient::new()?;
-    let request = isahc::Request::builder()
-        .method("POST")
-        .uri("https://pump.fun/api/ipfs")
-        .header(
-            "Content-Type",
-            format!("multipart/form-data; boundary={}", boundary),
-        )
-        .body(isahc::AsyncBody::from(body))?;
-
-    // Send request and get response
-    let mut response = client.send_async(request).await?;
-    let text = response.text().await?;
+    tracing::info!("✅ Metadata uploaded to IPFS: {}", metadata_response.metadata_uri);
     
-    // Debug: print raw response
-    println!("IPFS API Response: {}", text);
-    
-    let json: TokenMetadataResponse = serde_json::from_str(&text)?;
-
-    Ok(json)
+    Ok(metadata_response)
 }
 
 /// Calculates the maximum amount to pay when buying tokens, accounting for slippage tolerance
@@ -225,4 +170,138 @@ pub fn calculate_with_slippage_buy(amount: u64, basis_points: u64) -> u64 {
 /// ```
 pub fn calculate_with_slippage_sell(amount: u64, basis_points: u64) -> u64 {
     amount - (amount * basis_points) / 10000
+}
+
+
+/// Step 1: Upload image file to IPFS
+async fn upload_image_to_ipfs(file_path: &str) -> Result<String> {
+    let boundary = "------------------------f4d9c2e8b7a5310f";
+    let mut body = Vec::new();
+
+    // Read the file contents
+    let mut file = File::open(file_path)
+        .context(format!("Failed to open image file: {}", file_path))?;
+    let mut file_contents = Vec::new();
+    file.read_to_end(&mut file_contents)
+        .context("Failed to read image file")?;
+
+    // Determine content type based on file extension
+    let content_type = if file_path.ends_with(".png") {
+        "image/png"
+    } else if file_path.ends_with(".jpg") || file_path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if file_path.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "application/octet-stream"
+    };
+
+    // Build multipart form data with file only
+    body.extend_from_slice(b"--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"image\"\r\n").as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
+    body.extend_from_slice(&file_contents);
+    body.extend_from_slice(b"\r\n--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"--\r\n");
+
+    // Send request to pump.fun IPFS endpoint
+    let client = isahc::HttpClient::new()?;
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri("https://pump.fun/api/ipfs")
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        )
+        .header("Content-Length", body.len() as u64)
+        .body(isahc::AsyncBody::from(body))?;
+
+    let mut response = client.send_async(request).await?;
+    let text = response.text().await?;
+    
+    let json: ImageUploadResponse = serde_json::from_str(&text)
+        .context(format!("Failed to parse image upload response: {}", text))?;
+
+    Ok(json.image)
+}
+
+/// Step 2: Upload JSON metadata to IPFS (with image URL)
+async fn upload_metadata_json_to_ipfs(
+    name: &str,
+    symbol: &str,
+    description: &str,
+    image_url: &str,
+    twitter: Option<&str>,
+    telegram: Option<&str>,
+    website: Option<&str>,
+) -> Result<MetadataUploadResponse> {
+    // Build JSON metadata object
+    let mut metadata_json = serde_json::json!({
+        "name": name,
+        "symbol": symbol,
+        "description": description,
+        "image": image_url,
+        "showName": true,
+        "createdOn": "https://pump.fun",
+    });
+
+    // Add optional fields
+    if let Some(tw) = twitter {
+        if !tw.is_empty() {
+            metadata_json["twitter"] = serde_json::json!(tw);
+        }
+    }
+    if let Some(tg) = telegram {
+        if !tg.is_empty() {
+            metadata_json["telegram"] = serde_json::json!(tg);
+        }
+    }
+    if let Some(ws) = website {
+        if !ws.is_empty() {
+            metadata_json["website"] = serde_json::json!(ws);
+        }
+    }
+
+    let boundary = "------------------------f4d9c2e8b7a5310f";
+    let mut body = Vec::new();
+
+    // Append JSON as file field
+    let json_string = serde_json::to_string(&metadata_json)?;
+    
+    body.extend_from_slice(b"--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"metadata.json\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(json_string.as_bytes());
+    body.extend_from_slice(b"\r\n--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"--\r\n");
+
+    // Send request to pump.fun IPFS endpoint
+    let client = isahc::HttpClient::new()?;
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri("https://pump.fun/api/ipfs")
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        )
+        .header("Content-Length", body.len() as u64)
+        .body(isahc::AsyncBody::from(body))?;
+
+    let mut response = client.send_async(request).await?;
+    let text = response.text().await?;
+    
+    let json: MetadataUploadResponse = serde_json::from_str(&text)
+        .context(format!("Failed to parse metadata upload response: {}", text))?;
+
+    Ok(json)
 }
