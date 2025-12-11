@@ -155,6 +155,7 @@ async fn upload_metadata_json(
     append_text_field(&mut body, boundary, "symbol", &metadata.symbol);
     append_text_field(&mut body, boundary, "description", &metadata.description);
     append_text_field(&mut body, boundary, "image", image_uri);
+    append_text_field(&mut body, boundary, "imageUri", image_uri);
     if let Some(twitter) = &metadata.twitter {
         append_text_field(&mut body, boundary, "twitter", twitter);
     }
@@ -165,6 +166,7 @@ async fn upload_metadata_json(
         append_text_field(&mut body, boundary, "website", website);
     }
     append_text_field(&mut body, boundary, "showName", "true");
+    append_text_field(&mut body, boundary, "createdOn", "https://pump.fun");
 
     // Close the boundary
     body.extend_from_slice(b"--");
