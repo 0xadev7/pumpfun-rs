@@ -7,7 +7,19 @@ pub mod transaction;
 
 use isahc::AsyncReadResponseExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{fs::File, io::Read};
+
+// Simple debug logging helper. Enable by setting the environment variable `PUMPFUN_DEBUG`.
+fn debug_enabled() -> bool {
+    std::env::var("PUMPFUN_DEBUG").is_ok()
+}
+
+fn debug_log(msg: &str) {
+    if debug_enabled() {
+        eprintln!("[pumpfun-utils] {}", msg);
+    }
+}
 
 /// Metadata structure for a token, matching the format expected by Pump.fun.
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,11 +125,70 @@ async fn upload_image_to_ipfs(file_path: &str) -> Result<String, Box<dyn std::er
         .header("Content-Length", body.len() as u64)
         .body(isahc::AsyncBody::from(body))?;
 
+    debug_log(&format!("Uploading image file: {} to https://pump.fun/api/ipfs", file_path));
+
     let mut response = client.send_async(request).await?;
     let text = response.text().await?;
-    let json: ImageUploadResponse = serde_json::from_str(&text)?;
 
-    Ok(json.image_uri)
+    debug_log(&format!("Image upload response body: {}", text));
+
+    // Try to deserialize into the expected struct first, but be tolerant to different response shapes.
+    if let Ok(parsed) = serde_json::from_str::<ImageUploadResponse>(&text) {
+        return Ok(parsed.image_uri);
+    }
+
+    // Fallback: parse as generic JSON and search for an IPFS/URL string.
+    let v: Value = serde_json::from_str(&text)?;
+    // Try common keys
+    if let Some(s) = v.get("imageUri").and_then(|v| v.as_str()) {
+        return Ok(s.to_string());
+    }
+    if let Some(s) = v.get("image_uri").and_then(|v| v.as_str()) {
+        return Ok(s.to_string());
+    }
+    if let Some(s) = v.get("uri").and_then(|v| v.as_str()) {
+        return Ok(s.to_string());
+    }
+    if let Some(s) = v.get("url").and_then(|v| v.as_str()) {
+        return Ok(s.to_string());
+    }
+
+    // Recursive search for any string containing 'ipfs' or '/ipfs/' or starting with http
+    fn find_ipfs_string(v: &Value) -> Option<String> {
+        match v {
+            Value::String(s) => {
+                let s_l = s.to_lowercase();
+                if s_l.contains("ipfs") || s_l.starts_with("http") {
+                    return Some(s.clone());
+                }
+                None
+            }
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(found) = find_ipfs_string(item) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            Value::Object(map) => {
+                for (_k, v) in map {
+                    if let Some(found) = find_ipfs_string(v) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    if let Some(found) = find_ipfs_string(&v) {
+        return Ok(found);
+    }
+
+    // If nothing matched, return an explicit error with the server response attached for debugging.
+    Err(format!("unexpected image upload response: {}", text).into())
 }
 
 /// Uploads token metadata JSON to IPFS via the Pump.fun API.
@@ -184,11 +255,93 @@ async fn upload_metadata_json(
         .header("Content-Length", body.len() as u64)
         .body(isahc::AsyncBody::from(body))?;
 
+    debug_log(&format!(
+        "Uploading metadata JSON for token '{}' with image '{}' to https://pump.fun/api/ipfs",
+        metadata.name, image_uri
+    ));
+
     let mut response = client.send_async(request).await?;
     let text = response.text().await?;
-    let json: TokenMetadataResponse = serde_json::from_str(&text)?;
 
-    Ok(json)
+    debug_log(&format!("Metadata upload response body: {}", text));
+
+    // Try to parse into expected response shape first.
+    if let Ok(parsed) = serde_json::from_str::<TokenMetadataResponse>(&text) {
+        return Ok(parsed);
+    }
+
+    // Fallback: parse generic JSON and try to extract metadata and a metadata URI
+    let v: Value = serde_json::from_str(&text)?;
+
+    // helper to extract metadata object
+    let metadata_obj = if let Some(m) = v.get("metadata") {
+        m.clone()
+    } else if let Some(d) = v.get("data") {
+        d.clone()
+    } else {
+        // maybe the response itself is the metadata
+        v.clone()
+    };
+
+    // Convert metadata_obj into TokenMetadata if possible
+    let metadata: TokenMetadata = serde_json::from_value(metadata_obj.clone()).map_err(|e| {
+        format!("failed to parse metadata object from response: {} -- response: {}", e, text)
+    })?;
+
+    // Try to find metadata URI in common fields
+    let metadata_uri = v
+        .get("metadataUri")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| v.get("metadata_uri").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .or_else(|| v.get("uri").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .or_else(|| v.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    let metadata_uri = match metadata_uri {
+        Some(u) => u,
+        None => {
+            // fallback: search for any ipfs-like string
+            fn find_ipfs_string(v: &Value) -> Option<String> {
+                match v {
+                    Value::String(s) => {
+                        let s_l = s.to_lowercase();
+                        if s_l.contains("ipfs") || s_l.starts_with("http") {
+                            return Some(s.clone());
+                        }
+                        None
+                    }
+                    Value::Array(arr) => {
+                        for item in arr {
+                            if let Some(found) = find_ipfs_string(item) {
+                                return Some(found);
+                            }
+                        }
+                        None
+                    }
+                    Value::Object(map) => {
+                        for (_k, v) in map {
+                            if let Some(found) = find_ipfs_string(v) {
+                                return Some(found);
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+
+            if let Some(found) = find_ipfs_string(&v) {
+                found
+            } else {
+                return Err(format!("unexpected metadata upload response: {}", text).into());
+            }
+        }
+    };
+
+    Ok(TokenMetadataResponse {
+        metadata,
+        metadata_uri,
+    })
 }
 
 /// Creates and uploads token metadata to IPFS via the Pump.fun API in two steps.
@@ -231,6 +384,8 @@ pub async fn create_token_metadata(
 ) -> Result<TokenMetadataResponse, Box<dyn std::error::Error>> {
     // Step 1: Upload image file to IPFS
     let image_uri = upload_image_to_ipfs(&metadata.file).await?;
+
+    debug_log(&format!("Image URI returned from upload: {}", image_uri));
 
     // Step 2: Upload metadata JSON with image URL
     let response = upload_metadata_json(&metadata, &image_uri).await?;
