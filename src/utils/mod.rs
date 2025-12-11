@@ -125,24 +125,16 @@ pub async fn create_token_metadata(
         body.extend_from_slice(b"\r\n");
     }
 
-    // Build JSON data object
-    let mut data = serde_json::json!({
+    // Build JSON data object - ALWAYS include all fields
+    let data = serde_json::json!({
         "name": metadata.name,
         "symbol": metadata.symbol,
         "description": metadata.description,
-        "showName": true
+        "showName": true,
+        "twitter": metadata.twitter.unwrap_or_default(),
+        "telegram": metadata.telegram.unwrap_or_default(),
+        "website": metadata.website.unwrap_or_default(),
     });
-
-    // Add optional fields
-    if let Some(twitter) = metadata.twitter {
-        data["twitter"] = serde_json::json!(twitter);
-    }
-    if let Some(telegram) = metadata.telegram {
-        data["telegram"] = serde_json::json!(telegram);
-    }
-    if let Some(website) = metadata.website {
-        data["website"] = serde_json::json!(website);
-    }
 
     // Append JSON data field
     let data_string = serde_json::to_string(&data)?;
