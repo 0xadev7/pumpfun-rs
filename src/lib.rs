@@ -707,7 +707,7 @@ impl PumpFun {
             instructions::Create {
                 name: ipfs.metadata.name,
                 symbol: ipfs.metadata.symbol,
-                uri: ipfs.metadata.image,
+                uri: ipfs.metadata_uri,
                 creator: self.payer.pubkey(),
             },
         )
