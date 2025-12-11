@@ -105,50 +105,73 @@ pub async fn create_token_metadata(
     let mut body = Vec::new();
 
     // Helper function to append form data
-    fn append_text_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    fn append_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &[u8], content_type: Option<&str>) {
         body.extend_from_slice(b"--");
         body.extend_from_slice(boundary.as_bytes());
         body.extend_from_slice(b"\r\n");
-        body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
-        );
-        body.extend_from_slice(value.as_bytes());
+        
+        if let Some(ct) = content_type {
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{}\"; filename=\"image.png\"\r\n", name).as_bytes(),
+            );
+            body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", ct).as_bytes());
+        } else {
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
+            );
+        }
+        
+        body.extend_from_slice(value);
         body.extend_from_slice(b"\r\n");
     }
 
-    // Append form fields
-    append_text_field(&mut body, boundary, "name", &metadata.name);
-    append_text_field(&mut body, boundary, "symbol", &metadata.symbol);
-    append_text_field(&mut body, boundary, "description", &metadata.description);
+    // Build JSON data object
+    let mut data = serde_json::json!({
+        "name": metadata.name,
+        "symbol": metadata.symbol,
+        "description": metadata.description,
+        "showName": true
+    });
+
+    // Add optional fields
     if let Some(twitter) = metadata.twitter {
-        append_text_field(&mut body, boundary, "twitter", &twitter);
+        data["twitter"] = serde_json::json!(twitter);
     }
     if let Some(telegram) = metadata.telegram {
-        append_text_field(&mut body, boundary, "telegram", &telegram);
+        data["telegram"] = serde_json::json!(telegram);
     }
     if let Some(website) = metadata.website {
-        append_text_field(&mut body, boundary, "website", &website);
+        data["website"] = serde_json::json!(website);
     }
-    append_text_field(&mut body, boundary, "showName", "true");
 
-    // Append file part
-    body.extend_from_slice(b"--");
-    body.extend_from_slice(boundary.as_bytes());
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"file\"\r\n");
-    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    // Append JSON data field
+    let data_string = serde_json::to_string(&data)?;
+    append_field(&mut body, boundary, "data", data_string.as_bytes(), None);
 
-    // Read the file contents
+    // Read and append file
     let mut file = File::open(&metadata.file)?;
     let mut file_contents = Vec::new();
     file.read_to_end(&mut file_contents)?;
-    body.extend_from_slice(&file_contents);
+    
+    // Determine content type based on file extension
+    let content_type = if metadata.file.ends_with(".png") {
+        "image/png"
+    } else if metadata.file.ends_with(".jpg") || metadata.file.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if metadata.file.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "application/octet-stream"
+    };
+    
+    append_field(&mut body, boundary, "file", &file_contents, Some(content_type));
 
-    // Close the boundary
-    body.extend_from_slice(b"\r\n--");
+    // Close boundary
+    body.extend_from_slice(b"--");
     body.extend_from_slice(boundary.as_bytes());
     body.extend_from_slice(b"--\r\n");
 
+    // Send request
     let client = isahc::HttpClient::new()?;
     let request = isahc::Request::builder()
         .method("POST")
@@ -160,7 +183,6 @@ pub async fn create_token_metadata(
         .header("Content-Length", body.len() as u64)
         .body(isahc::AsyncBody::from(body))?;
 
-    // Send request and print response
     let mut response = client.send_async(request).await?;
     let text = response.text().await?;
     let json: TokenMetadataResponse = serde_json::from_str(&text)?;
