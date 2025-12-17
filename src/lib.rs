@@ -713,6 +713,257 @@ impl PumpFun {
         )
     }
 
+    /// Creates a new Token 2022 token with metadata by uploading metadata to IPFS and initializing on-chain accounts
+    ///
+    /// This method handles the complete process of creating a new Token 2022 token on Pump.fun:
+    /// 1. Uploads token metadata and image to IPFS
+    /// 2. Creates a new SPL Token 2022 token with the provided mint keypair
+    /// 3. Initializes the bonding curve that determines token pricing
+    /// 4. Supports mayhem mode functionality
+    ///
+    /// # Arguments
+    ///
+    /// * `mint` - Keypair for the new token mint account that will be created
+    /// * `metadata` - Token metadata including name, symbol, description and image file
+    /// * `mayhem_mode` - Whether to enable mayhem mode for this token
+    /// * `priority_fee` - Optional priority fee configuration for compute units. If None, uses the
+    ///   default from the cluster configuration
+    ///
+    /// # Returns
+    ///
+    /// Returns the transaction signature if successful, or a ClientError if the operation fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Metadata upload to IPFS fails
+    /// - Transaction creation fails
+    /// - Transaction execution on Solana fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pumpfun::{PumpFun, common::types::{Cluster, PriorityFee}, utils::CreateTokenMetadata};
+    /// # use solana_sdk::{commitment_config::CommitmentConfig, signature::Keypair};
+    /// # use std::sync::Arc;
+    /// #
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let payer = Arc::new(Keypair::new());
+    /// # let commitment = CommitmentConfig::confirmed();
+    /// # let cluster = Cluster::devnet(commitment, PriorityFee::default());
+    /// # let client = PumpFun::new(payer, cluster);
+    /// let mint = Keypair::new();
+    /// let metadata = CreateTokenMetadata {
+    ///     name: "My Token".to_string(),
+    ///     symbol: "MYTKN".to_string(),
+    ///     description: "A test token created with Pump.fun".to_string(),
+    ///     file: "path/to/image.png".to_string(),
+    ///     twitter: None,
+    ///     telegram: None,
+    ///     website: Some("https://example.com".to_string()),
+    /// };
+    ///
+    /// let signature = client.create_v2(mint, metadata, false, None).await?;
+    /// println!("Token created! Signature: {}", signature);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn create_v2(
+        &self,
+        mint: Keypair,
+        metadata: utils::CreateTokenMetadata,
+        mayhem_mode: bool,
+        priority_fee: Option<PriorityFee>,
+    ) -> Result<Signature, error::ClientError> {
+        // First upload metadata and image to IPFS
+        let ipfs: utils::TokenMetadataResponse = utils::create_token_metadata(metadata)
+            .await
+            .map_err(error::ClientError::UploadMetadataError)?;
+
+        // Add priority fee if provided or default to cluster priority fee
+        let priority_fee = priority_fee.unwrap_or(self.cluster.priority_fee);
+        let mut instructions = Self::get_priority_fee_instructions(&priority_fee);
+
+        // Add create_v2 token instruction
+        let create_ix = self.get_create_v2_instruction(&mint, ipfs, mayhem_mode);
+        instructions.push(create_ix);
+
+        // Create and sign transaction
+        let transaction = get_transaction(
+            self.rpc.clone(),
+            self.payer.clone(),
+            &instructions,
+            Some(&[&mint]),
+            #[cfg(feature = "versioned-tx")]
+            None,
+        )
+        .await?;
+
+        // Send and confirm transaction
+        let signature = self
+            .rpc
+            .send_and_confirm_transaction(&transaction)
+            .await
+            .map_err(error::ClientError::SolanaClientError)?;
+
+        Ok(signature)
+    }
+
+    /// Creates a new Token 2022 token and immediately buys an initial amount in a single atomic transaction
+    ///
+    /// This method combines Token 2022 token creation and an initial purchase into a single atomic transaction.
+    /// This is often preferred for new token launches as it:
+    /// 1. Creates the Token 2022 token and its bonding curve
+    /// 2. Makes an initial purchase to establish liquidity
+    /// 3. Guarantees that the creator becomes the first holder
+    /// 4. Supports mayhem mode functionality
+    ///
+    /// The entire operation is executed as a single transaction, ensuring atomicity.
+    ///
+    /// # Arguments
+    ///
+    /// * `mint` - Keypair for the new token mint account that will be created
+    /// * `metadata` - Token metadata including name, symbol, description and image file
+    /// * `amount_sol` - Amount of SOL to spend on the initial buy, in lamports (1 SOL = 1,000,000,000 lamports)
+    /// * `mayhem_mode` - Whether to enable mayhem mode for this token
+    /// * `slippage_basis_points` - Optional maximum acceptable slippage in basis points (1 bp = 0.01%).
+    ///   If None, defaults to 500 (5%)
+    /// * `priority_fee` - Optional priority fee configuration for compute units. If None, uses the
+    ///   default from the cluster configuration
+    ///
+    /// # Returns
+    ///
+    /// Returns the transaction signature if successful, or a ClientError if the operation fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Metadata upload to IPFS fails
+    /// - Account retrieval fails
+    /// - Transaction creation fails
+    /// - Transaction execution on Solana fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use pumpfun::{PumpFun, common::types::{Cluster, PriorityFee}, utils::CreateTokenMetadata};
+    /// # use solana_sdk::{commitment_config::CommitmentConfig, native_token::sol_to_lamports, signature::Keypair};
+    /// # use std::sync::Arc;
+    /// #
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let payer = Arc::new(Keypair::new());
+    /// # let commitment = CommitmentConfig::confirmed();
+    /// # let cluster = Cluster::devnet(commitment, PriorityFee::default());
+    /// # let client = PumpFun::new(payer, cluster);
+    /// let mint = Keypair::new();
+    /// let metadata = CreateTokenMetadata {
+    ///     name: "My Token".to_string(),
+    ///     symbol: "MYTKN".to_string(),
+    ///     description: "A test token created with Pump.fun".to_string(),
+    ///     file: "path/to/image.png".to_string(),
+    ///     twitter: None,
+    ///     telegram: None,
+    ///     website: Some("https://example.com".to_string()),
+    /// };
+    ///
+    /// // Create Token 2022 token and buy 0.1 SOL worth with 5% slippage tolerance
+    /// let amount_sol = sol_to_lamports(0.1f64); // 0.1 SOL in lamports
+    /// let slippage_bps = Some(500); // 5%
+    /// let track_volume = Some(true); // Track this initial buy in volume stats
+    ///
+    /// let signature = client.create_v2_and_buy(mint, metadata, amount_sol, false, track_volume, slippage_bps, None).await?;
+    /// println!("Token created and bought! Signature: {}", signature);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn create_v2_and_buy(
+        &self,
+        mint: Keypair,
+        metadata: utils::CreateTokenMetadata,
+        amount_sol: u64,
+        mayhem_mode: bool,
+        track_volume: Option<bool>,
+        slippage_basis_points: Option<u64>,
+        priority_fee: Option<PriorityFee>,
+    ) -> Result<Signature, error::ClientError> {
+        // Upload metadata to IPFS first
+        let ipfs: utils::TokenMetadataResponse = utils::create_token_metadata(metadata)
+            .await
+            .map_err(error::ClientError::UploadMetadataError)?;
+
+        // Add priority fee if provided or default to cluster priority fee
+        let priority_fee = priority_fee.unwrap_or(self.cluster.priority_fee);
+        let mut instructions = Self::get_priority_fee_instructions(&priority_fee);
+
+        // Add create_v2 token instruction
+        let create_ix = self.get_create_v2_instruction(&mint, ipfs, mayhem_mode);
+        instructions.push(create_ix);
+
+        // Add buy instruction (using Token 2022 for create_v2)
+        let buy_ix = self
+            .get_buy_instructions_v2(
+                mint.pubkey(),
+                amount_sol,
+                track_volume,
+                slippage_basis_points,
+            )
+            .await?;
+        instructions.extend(buy_ix);
+
+        // Create and sign transaction
+        let transaction = get_transaction(
+            self.rpc.clone(),
+            self.payer.clone(),
+            &instructions,
+            Some(&[&mint]),
+            #[cfg(feature = "versioned-tx")]
+            None,
+        )
+        .await?;
+
+        // Send and confirm transaction
+        let signature = self
+            .rpc
+            .send_and_confirm_transaction(&transaction)
+            .await
+            .map_err(error::ClientError::SolanaClientError)?;
+
+        Ok(signature)
+    }
+
+    /// Creates an instruction for initializing a new Token 2022 token
+    ///
+    /// Generates a Solana instruction to create a new Token 2022 token with a bonding curve on Pump.fun.
+    /// This instruction will initialize the token mint, bonding curve accounts, and mayhem mode accounts if enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `mint` - Keypair for the new token mint account that will be created
+    /// * `ipfs` - Token metadata response from IPFS upload containing name, symbol, and URI
+    /// * `mayhem_mode` - Whether to enable mayhem mode for this token
+    ///
+    /// # Returns
+    ///
+    /// Returns a Solana instruction for creating a new Token 2022 token
+    pub fn get_create_v2_instruction(
+        &self,
+        mint: &Keypair,
+        ipfs: utils::TokenMetadataResponse,
+        mayhem_mode: bool,
+    ) -> Instruction {
+        instructions::create_v2(
+            &self.payer,
+            mint,
+            instructions::CreateV2 {
+                name: ipfs.metadata.name,
+                symbol: ipfs.metadata.symbol,
+                uri: ipfs.metadata_uri,
+                creator: self.payer.pubkey(),
+                is_mayhem_mode: mayhem_mode,
+            },
+        )
+    }
+
     /// Generates instructions for buying tokens from a bonding curve
     ///
     /// Creates a set of Solana instructions needed to purchase tokens using SOL. These
@@ -808,6 +1059,89 @@ impl PumpFun {
             &mint,
             &global_account.fee_recipient,
             &bonding_curve_account.map_or(self.payer.pubkey(), |bc| bc.creator),
+            instructions::Buy {
+                amount: buy_amount,
+                max_sol_cost: buy_amount_with_slippage,
+                track_volume,
+            },
+        ));
+
+        Ok(instructions)
+    }
+
+    /// Generates instructions for buying tokens from a bonding curve using Token 2022
+    ///
+    /// Creates a set of Solana instructions needed to purchase Token 2022 tokens using SOL. These
+    /// instructions may include creating an associated token account if needed, and the actual
+    /// buy instruction with slippage protection.
+    ///
+    /// # Arguments
+    ///
+    /// * `mint` - Public key of the token mint to buy
+    /// * `amount_sol` - Amount of SOL to spend, in lamports (1 SOL = 1,000,000,000 lamports)
+    /// * `slippage_basis_points` - Optional maximum acceptable slippage in basis points (1 bp = 0.01%).
+    ///   If None, defaults to 500 (5%)
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of Solana instructions if successful, or a ClientError if the operation fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The global account or bonding curve account cannot be fetched
+    /// - The buy price calculation fails
+    /// - Token account-related operations fail
+    pub async fn get_buy_instructions_v2(
+        &self,
+        mint: Pubkey,
+        amount_sol: u64,
+        track_volume: Option<bool>,
+        slippage_basis_points: Option<u64>,
+    ) -> Result<Vec<Instruction>, error::ClientError> {
+        // Get accounts and calculate buy amounts
+        let global_account = self.get_global_account().await?;
+        let mut bonding_curve_account: Option<accounts::BondingCurveAccount> = None;
+        let buy_amount = {
+            let bonding_curve_pda = Self::get_bonding_curve_pda(&mint)
+                .ok_or(error::ClientError::BondingCurveNotFound)?;
+            if self.rpc.get_account(&bonding_curve_pda).await.is_err() {
+                global_account.get_initial_buy_price(amount_sol)
+            } else {
+                bonding_curve_account = self.get_bonding_curve_account(&mint).await.ok();
+                bonding_curve_account
+                    .as_ref()
+                    .unwrap()
+                    .get_buy_price(amount_sol)
+                    .map_err(error::ClientError::BondingCurveError)?
+            }
+        };
+        let buy_amount_with_slippage =
+            utils::calculate_with_slippage_buy(amount_sol, slippage_basis_points.unwrap_or(500));
+
+        let mut instructions = Vec::new();
+
+        // Create Associated Token Account if needed (using Token 2022)
+        #[cfg(feature = "create-ata")]
+        {
+            let ata: Pubkey = get_associated_token_address(&self.payer.pubkey(), &mint);
+            if self.rpc.get_account(&ata).await.is_err() {
+                instructions.push(create_associated_token_account(
+                    &self.payer.pubkey(),
+                    &self.payer.pubkey(),
+                    &mint,
+                    &constants::accounts::TOKEN_2022_PROGRAM,
+                ));
+            }
+        }
+
+        // Add buy instruction (using Token 2022)
+        instructions.push(instructions::buy_with_token_program(
+            &self.payer,
+            &mint,
+            &global_account.fee_recipient,
+            &bonding_curve_account.map_or(self.payer.pubkey(), |bc| bc.creator),
+            &constants::accounts::TOKEN_2022_PROGRAM,
             instructions::Buy {
                 amount: buy_amount,
                 max_sol_cost: buy_amount_with_slippage,
@@ -1227,5 +1561,74 @@ impl PumpFun {
             &constants::accounts::PUMPFUN,
         );
         user_volume_accumulator
+    }
+
+    /// Gets the Program Derived Address (PDA) for the Mayhem global params account
+    ///
+    /// Derives the address of the Mayhem global params account using the Mayhem program ID
+    /// and a constant seed.
+    ///
+    /// # Returns
+    ///
+    /// Returns the PDA public key for the Mayhem global params account
+    pub fn get_global_params_pda() -> Pubkey {
+        let (global_params, _bump) = Pubkey::find_program_address(
+            &[b"global-params"],
+            &constants::accounts::MAYHEM_PROGRAM,
+        );
+        global_params
+    }
+
+    /// Gets the Program Derived Address (PDA) for the Mayhem SOL vault account
+    ///
+    /// Derives the address of the Mayhem SOL vault account using the Mayhem program ID
+    /// and a constant seed.
+    ///
+    /// # Returns
+    ///
+    /// Returns the PDA public key for the Mayhem SOL vault account
+    pub fn get_sol_vault_pda() -> Pubkey {
+        let (sol_vault, _bump) = Pubkey::find_program_address(
+            &[b"sol-vault"],
+            &constants::accounts::MAYHEM_PROGRAM,
+        );
+        sol_vault
+    }
+
+    /// Gets the Program Derived Address (PDA) for a token's Mayhem state account
+    ///
+    /// Derives the address of a token's Mayhem state account using the Mayhem program ID,
+    /// a constant seed, and the token mint address.
+    ///
+    /// # Arguments
+    ///
+    /// * `mint` - Public key of the token mint
+    ///
+    /// # Returns
+    ///
+    /// Returns the PDA public key for the token's Mayhem state account
+    pub fn get_mayhem_state_pda(mint: &Pubkey) -> Pubkey {
+        let (mayhem_state, _bump) = Pubkey::find_program_address(
+            &[b"mayhem-state", mint.as_ref()],
+            &constants::accounts::MAYHEM_PROGRAM,
+        );
+        mayhem_state
+    }
+
+    /// Gets the associated token address for the Mayhem token vault
+    ///
+    /// Derives the associated token account address for the Mayhem SOL vault
+    /// with the given mint, using Token 2022 program.
+    ///
+    /// # Arguments
+    ///
+    /// * `mint` - Public key of the token mint
+    ///
+    /// # Returns
+    ///
+    /// Returns the associated token account address for the Mayhem token vault
+    pub fn get_token_vault_pda(mint: &Pubkey) -> Pubkey {
+        let sol_vault = Self::get_sol_vault_pda();
+        get_associated_token_address(&sol_vault, mint)
     }
 }

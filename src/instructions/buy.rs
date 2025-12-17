@@ -117,3 +117,57 @@ pub fn buy(
         ],
     )
 }
+
+/// Creates an instruction to buy tokens from a bonding curve with a specified token program
+///
+/// This is a variant of the `buy` function that allows specifying the token program to use.
+/// This is useful for Token 2022 tokens which use the Token 2022 program instead of the standard Token program.
+///
+/// # Arguments
+///
+/// * `payer` - Keypair that will provide the SOL to buy tokens
+/// * `mint` - Public key of the token mint to buy
+/// * `fee_recipient` - Public key of the account that will receive the transaction fee
+/// * `creator` - Public key of the token's creator
+/// * `token_program` - Public key of the token program to use (Token or Token 2022)
+/// * `args` - Buy instruction data containing the token amount and maximum acceptable SOL price
+///
+/// # Returns
+///
+/// Returns a Solana instruction that when executed will buy tokens from the bonding curve
+pub fn buy_with_token_program(
+    payer: &Keypair,
+    mint: &Pubkey,
+    fee_recipient: &Pubkey,
+    creator: &Pubkey,
+    token_program: &Pubkey,
+    args: Buy,
+) -> Instruction {
+    let bonding_curve: Pubkey = PumpFun::get_bonding_curve_pda(mint).unwrap();
+    let creator_vault: Pubkey = PumpFun::get_creator_vault_pda(creator).unwrap();
+    Instruction::new_with_bytes(
+        constants::accounts::PUMPFUN,
+        &args.data(),
+        vec![
+            AccountMeta::new_readonly(PumpFun::get_global_pda(), false),
+            AccountMeta::new(*fee_recipient, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new(bonding_curve, false),
+            AccountMeta::new(get_associated_token_address(&bonding_curve, mint), false),
+            AccountMeta::new(get_associated_token_address(&payer.pubkey(), mint), false),
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(constants::accounts::SYSTEM_PROGRAM, false),
+            AccountMeta::new_readonly(*token_program, false),
+            AccountMeta::new(creator_vault, false),
+            AccountMeta::new_readonly(constants::accounts::EVENT_AUTHORITY, false),
+            AccountMeta::new_readonly(constants::accounts::PUMPFUN, false),
+            AccountMeta::new(constants::accounts::GLOBAL_VOLUME_ACCUMULATOR, false),
+            AccountMeta::new(
+                PumpFun::get_user_volume_accumulator_pda(&payer.pubkey()),
+                false,
+            ),
+            AccountMeta::new_readonly(constants::accounts::FEE_CONFIG, false),
+            AccountMeta::new_readonly(constants::accounts::FEE_CONFIG_PROGRAM, false),
+        ],
+    )
+}
