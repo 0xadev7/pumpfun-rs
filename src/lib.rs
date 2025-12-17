@@ -899,6 +899,24 @@ impl PumpFun {
         let create_ix = self.get_create_v2_instruction(&mint, ipfs, mayhem_mode);
         instructions.push(create_ix);
 
+        // Add extend account instruction for bonding curve
+        let bonding_curve_pda = Self::get_bonding_curve_pda(&mint.pubkey())
+            .ok_or(error::ClientError::BondingCurveNotFound)?;
+        let extend_account_ix = instructions::extend_account(&self.payer, &bonding_curve_pda);
+        instructions.push(extend_account_ix);
+
+        // Add create associated token account instruction (idempotent) using Token 2022
+        #[cfg(feature = "create-ata")]
+        {
+            let create_ata_ix = create_associated_token_account(
+                &self.payer.pubkey(),
+                &self.payer.pubkey(),
+                &mint.pubkey(),
+                &constants::accounts::TOKEN_2022_PROGRAM,
+            );
+            instructions.push(create_ata_ix);
+        }
+
         // Add buy instruction (using Token 2022 for create_v2)
         let buy_ix = self
             .get_buy_instructions_v2(

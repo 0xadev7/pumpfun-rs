@@ -10,8 +10,10 @@
 
 mod buy;
 mod create;
+mod extend_account;
 mod sell;
 
 pub use buy::*;
 pub use create::*;
+pub use extend_account::*;
 pub use sell::*;
