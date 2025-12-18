@@ -145,6 +145,21 @@ pub fn buy_with_token_program(
 ) -> Instruction {
     let bonding_curve: Pubkey = PumpFun::get_bonding_curve_pda(mint).unwrap();
     let creator_vault: Pubkey = PumpFun::get_creator_vault_pda(creator).unwrap();
+    
+    // Derive associated_bonding_curve PDA with Token 2022 program ID
+    // The PDA seeds are: [bonding_curve, token_program, mint]
+    // For create_v2, we must use TOKEN_2022_PROGRAM instead of TOKEN_PROGRAM
+    let associated_bonding_curve = PumpFun::get_associated_token_address_with_program(
+        &bonding_curve,
+        mint,
+        token_program,
+    );
+    let associated_user = PumpFun::get_associated_token_address_with_program(
+        &payer.pubkey(),
+        mint,
+        token_program,
+    );
+
     Instruction::new_with_bytes(
         constants::accounts::PUMPFUN,
         &args.data(),
@@ -153,8 +168,8 @@ pub fn buy_with_token_program(
             AccountMeta::new(*fee_recipient, false),
             AccountMeta::new_readonly(*mint, false),
             AccountMeta::new(bonding_curve, false),
-            AccountMeta::new(get_associated_token_address(&bonding_curve, mint), false),
-            AccountMeta::new(get_associated_token_address(&payer.pubkey(), mint), false),
+            AccountMeta::new(associated_bonding_curve, false),
+            AccountMeta::new(associated_user, false),
             AccountMeta::new(payer.pubkey(), true),
             AccountMeta::new_readonly(constants::accounts::SYSTEM_PROGRAM, false),
             AccountMeta::new_readonly(*token_program, false),

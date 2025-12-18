@@ -23,6 +23,7 @@ use spl_associated_token_account::instruction::create_associated_token_account;
 use spl_token::instruction::close_account;
 use std::sync::Arc;
 use utils::transaction::get_transaction;
+use tracing::{info, error};
 
 /// Main client for interacting with the Pump.fun program
 ///
@@ -895,17 +896,24 @@ impl PumpFun {
         let priority_fee = priority_fee.unwrap_or(self.cluster.priority_fee);
         let mut instructions = Self::get_priority_fee_instructions(&priority_fee);
 
+        // Derive bonding curve PDA (needed for subsequent instructions)
+        let bonding_curve_pda = Self::get_bonding_curve_pda(&mint.pubkey())
+            .ok_or(error::ClientError::BondingCurveNotFound)?;
+
         // Add create_v2 token instruction
+        // The program should create the associated_bonding_curve account via CPI during execution.
+        // The account is included in the instruction's account list (position 4) and marked as writable,
+        // and all necessary programs (ASSOCIATED_TOKEN_PROGRAM, TOKEN_2022_PROGRAM, SYSTEM_PROGRAM)
+        // are included, which should allow the program to create it via CPI.
         let create_ix = self.get_create_v2_instruction(&mint, ipfs, mayhem_mode);
         instructions.push(create_ix);
 
         // Add extend account instruction for bonding curve
-        let bonding_curve_pda = Self::get_bonding_curve_pda(&mint.pubkey())
-            .ok_or(error::ClientError::BondingCurveNotFound)?;
         let extend_account_ix = instructions::extend_account(&self.payer, &bonding_curve_pda);
         instructions.push(extend_account_ix);
 
         // Add create associated token account instruction (idempotent) using Token 2022
+        // Pre-calculate the associated user ATA address
         #[cfg(feature = "create-ata")]
         {
             let create_ata_ix = create_associated_token_account(
@@ -917,15 +925,13 @@ impl PumpFun {
             instructions.push(create_ata_ix);
         }
 
-        // Add buy instruction (using Token 2022 for create_v2)
-        let buy_ix = self
-            .get_buy_instructions_v2(
-                mint.pubkey(),
-                amount_sol,
-                track_volume,
-                slippage_basis_points,
-            )
-            .await?;
+        // Add buy instruction for v2
+        let buy_ix = self.get_buy_instructions_v2(
+            mint.pubkey(),
+            amount_sol,
+            track_volume,
+            slippage_basis_points
+        ).await?;
         instructions.extend(buy_ix);
 
         // Create and sign transaction
@@ -1138,20 +1144,6 @@ impl PumpFun {
             utils::calculate_with_slippage_buy(amount_sol, slippage_basis_points.unwrap_or(500));
 
         let mut instructions = Vec::new();
-
-        // Create Associated Token Account if needed (using Token 2022)
-        #[cfg(feature = "create-ata")]
-        {
-            let ata: Pubkey = get_associated_token_address(&self.payer.pubkey(), &mint);
-            if self.rpc.get_account(&ata).await.is_err() {
-                instructions.push(create_associated_token_account(
-                    &self.payer.pubkey(),
-                    &self.payer.pubkey(),
-                    &mint,
-                    &constants::accounts::TOKEN_2022_PROGRAM,
-                ));
-            }
-        }
 
         // Add buy instruction (using Token 2022)
         instructions.push(instructions::buy_with_token_program(
@@ -1648,5 +1640,31 @@ impl PumpFun {
     pub fn get_token_vault_pda(mint: &Pubkey) -> Pubkey {
         let sol_vault = Self::get_sol_vault_pda();
         get_associated_token_address(&sol_vault, mint)
+    }
+
+    /// Gets the associated token address PDA for a given owner, mint, and token program
+    ///
+    /// This manually derives the associated token account PDA using the same seeds as
+    /// the Associated Token Program. The seeds are: [owner, token_program, mint]
+    ///
+    /// # Arguments
+    ///
+    /// * `owner` - The owner of the associated token account
+    /// * `mint` - The mint address of the token
+    /// * `token_program` - The token program ID (TOKEN_PROGRAM or TOKEN_2022_PROGRAM)
+    ///
+    /// # Returns
+    ///
+    /// Returns the associated token account address
+    pub fn get_associated_token_address_with_program(
+        owner: &Pubkey,
+        mint: &Pubkey,
+        token_program: &Pubkey,
+    ) -> Pubkey {
+        let (ata, _bump) = Pubkey::find_program_address(
+            &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+            &constants::accounts::ASSOCIATED_TOKEN_PROGRAM,
+        );
+        ata
     }
 }

@@ -183,27 +183,36 @@ pub fn create_v2(payer: &Keypair, mint: &Keypair, args: CreateV2) -> Instruction
     let mayhem_state = PumpFun::get_mayhem_state_pda(&mint.pubkey());
     let mayhem_token_vault = PumpFun::get_token_vault_pda(&mint.pubkey());
 
+    // Derive associated_bonding_curve PDA with Token 2022 program ID
+    // The PDA seeds are: [bonding_curve, token_program, mint]
+    // For create_v2, we must use TOKEN_2022_PROGRAM instead of TOKEN_PROGRAM
+    let associated_bonding_curve = PumpFun::get_associated_token_address_with_program(
+        &bonding_curve,
+        &mint.pubkey(),
+        &constants::accounts::TOKEN_2022_PROGRAM,
+    );
+
     Instruction::new_with_bytes(
         constants::accounts::PUMPFUN,
         &args.data(),
         vec![
             AccountMeta::new(mint.pubkey(), true),
             AccountMeta::new(PumpFun::get_mint_authority_pda(), false),
-            AccountMeta::new(bonding_curve, false),
+            AccountMeta::new(bonding_curve, false), // writable in IDL, but AccountMeta::new already makes it writable
             AccountMeta::new(
-                get_associated_token_address(&bonding_curve, &mint.pubkey()),
-                false,
+                associated_bonding_curve,
+                false, // writable in IDL, but AccountMeta::new already makes it writable
             ),
             AccountMeta::new_readonly(PumpFun::get_global_pda(), false),
             AccountMeta::new(payer.pubkey(), true),
             AccountMeta::new_readonly(constants::accounts::SYSTEM_PROGRAM, false),
             AccountMeta::new_readonly(constants::accounts::TOKEN_2022_PROGRAM, false),
             AccountMeta::new_readonly(constants::accounts::ASSOCIATED_TOKEN_PROGRAM, false),
-            AccountMeta::new(mayhem_program, false),
+            AccountMeta::new(mayhem_program, false), // writable in IDL, but AccountMeta::new already makes it writable
             AccountMeta::new_readonly(global_params, false),
-            AccountMeta::new(sol_vault, false),
-            AccountMeta::new(mayhem_state, false),
-            AccountMeta::new(mayhem_token_vault, false),
+            AccountMeta::new(sol_vault, false), // writable in IDL, but AccountMeta::new already makes it writable
+            AccountMeta::new(mayhem_state, false), // writable in IDL, but AccountMeta::new already makes it writable
+            AccountMeta::new(mayhem_token_vault, false), // writable in IDL, but AccountMeta::new already makes it writable
             AccountMeta::new_readonly(constants::accounts::EVENT_AUTHORITY, false),
             AccountMeta::new_readonly(constants::accounts::PUMPFUN, false),
         ],
